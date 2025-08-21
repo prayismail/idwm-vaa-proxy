@@ -1,16 +1,37 @@
-// File: api/check-vaac.js
-// VERSI UPDATE: Menambahkan filter AREA: INDONESIA
+// File: api/check-vaac.js (di proyek Vercel idwm-vaa-proxy)
 
 const ftp = require('basic-ftp');
 const { Writable } = require('stream');
 
-// Helper function (tetap sama)
 function getTimestampFromAnyFilename(filename) {
     const match = filename.match(/\.(\d{12})\./);
     return match ? match[1] : null;
 }
 
 module.exports = async (req, res) => {
+    // ================== BLOK KODE PERBAIKAN CORS (PENTING!) ==================
+    // Memberikan izin kepada SEMUA domain ('*') untuk mengakses API ini.
+    // Ini aman untuk API publik.
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    
+    // Memberitahu browser metode apa saja yang diizinkan.
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    
+    // Memberitahu browser header apa saja yang boleh ada dalam permintaan.
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    // Browser terkadang mengirim "preflight request" dengan metode OPTIONS
+    // untuk memeriksa izin CORS sebelum mengirim permintaan GET yang sebenarnya.
+    // Kita harus menanggapinya dengan status OK.
+    if (req.method === 'OPTIONS') {
+        return res.status(200).end();
+    }
+    // ========================= AKHIR BLOK PERBAIKAN CORS =========================
+
+
+    // Atur cache untuk menghemat kuota Vercel Anda.
+    res.setHeader('Cache-Control', 's-maxage=30, stale-while-revalidate=60');
+
     if (req.method !== 'GET') {
         return res.status(405).json({ error: `Method ${req.method} Not Allowed` });
     }
@@ -19,14 +40,13 @@ module.exports = async (req, res) => {
 
     try {
         await client.access({ host: "ftp.bom.gov.au" });
-
         const currentYear = new Date().getFullYear();
         const directoryPath = `/anon/gen/vaac/${currentYear}`;
-        
         await client.cd(directoryPath);
         const list = await client.list();
 
-        // Cari file .txt terbaru berdasarkan timestamp (logika ini tetap sama)
+        // --- SISA KODE ANDA DI BAWAH INI SAMA PERSIS DAN SUDAH BENAR ---
+
         const darwinTxtFiles = list.filter(item => item.name.startsWith('IDY') && item.name.endsWith('.txt') && item.type === ftp.FileType.File);
         if (darwinTxtFiles.length === 0) {
             return res.status(404).json({ error: `Tidak ada file .txt ditemukan.` });
@@ -46,61 +66,40 @@ module.exports = async (req, res) => {
             return res.status(404).json({ error: `Tidak ada file .txt valid.` });
         }
         
-        console.log(`[Proxy VAAC-FTP] File TXT terbaru: ${latestFile.name}`);
-
-        // --- MENGUNDUH FILE TXT ---
         const txtWritable = new Writable();
         const txtChunks = [];
         txtWritable._write = (chunk, encoding, next) => { txtChunks.push(chunk); next(); };
         await client.downloadTo(txtWritable, latestFile.name);
         const fullText = Buffer.concat(txtChunks).toString('utf-8');
 
-        // --- PEMBARUAN: FILTER BERDASARKAN AREA INDONESIA ---
-        // Regex untuk mencari "AREA: INDONESIA" secara case-insensitive dan di baris terpisah
         const isIndonesiaArea = /^AREA:\s*INDONESIA/im.test(fullText);
 
         if (!isIndonesiaArea) {
-            console.log(`[Proxy VAAC-FTP] VAA terbaru (${latestFile.name}) bukan untuk area Indonesia.`);
-            // Kirim respons bahwa VAA tidak relevan, namun tetap berstatus 200 OK
-            // agar client bisa menanganinya sebagai "tidak ada VAA aktif untuk Indonesia".
             return res.status(200).json({
                 advisoryNumber: null,
                 message: "Latest VAA is not for Indonesia area.",
-                fullText: fullText, // Tetap kirim teksnya untuk debugging
+                fullText: fullText,
                 imageBase64: null
             });
         }
-        // --- AKHIR DARI PEMBARUAN ---
-
-        // Jika lolos filter, lanjutkan proses
-        console.log(`[Proxy VAAC-FTP] VAA terdeteksi untuk area Indonesia.`);
+        
         const advisoryMatch = fullText.match(/ADVISORY\s+NR:\s*(\d{4}\/\d+)/i);
         const advisoryNumber = advisoryMatch ? advisoryMatch[1] : null;
-
-        // --- LOGIKA CARI DAN UNDUH FILE PNG (tetap sama) ---
+        
         let imageBase64 = null;
         const matchingPngFile = list.find(item => 
             item.name.endsWith('.png') && getTimestampFromAnyFilename(item.name) === latestTimestamp
         );
         
         if (matchingPngFile) {
-            console.log(`[Proxy VAAC-FTP] File PNG pasangan ditemukan: ${matchingPngFile.name}`);
             const pngWritable = new Writable();
             const pngChunks = [];
             pngWritable._write = (chunk, encoding, next) => { pngChunks.push(chunk); next(); };
-            
             await client.downloadTo(pngWritable, matchingPngFile.name);
-            
             const imageBuffer = Buffer.concat(pngChunks);
             imageBase64 = `data:image/png;base64,${imageBuffer.toString('base64')}`;
-            console.log(`[Proxy VAAC-FTP] Berhasil mengonversi PNG ke Base64.`);
-        } else {
-            console.log(`[Proxy VAAC-FTP] Tidak ada file PNG yang cocok untuk timestamp ${latestTimestamp}`);
         }
 
-        res.setHeader('Cache-Control', 's-maxage=60, stale-while-revalidate=30');
-
-        
         res.status(200).json({
           advisoryNumber: advisoryNumber,
           fullText: fullText,
@@ -108,7 +107,7 @@ module.exports = async (req, res) => {
         });
 
     } catch (error) {
-        console.error('[Proxy VAAC-FTP] Kesalahan internal:', error);
+        console.error('[Proxy VAAC-FTP-Vercel] Kesalahan internal:', error);
         res.status(500).json({ error: 'Kesalahan internal pada server proxy FTP.', details: error.message });
     } finally {
         if (!client.closed) client.close();
