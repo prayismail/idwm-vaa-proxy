@@ -2,6 +2,7 @@
 
 const ftp = require('basic-ftp');
 const { Writable } = require('stream');
+const crypto = require('crypto'); // --- BARU: Impor modul kriptografi
 
 function getTimestampFromAnyFilename(filename) {
     const match = filename.match(/\.(\d{12})\./);
@@ -10,26 +11,15 @@ function getTimestampFromAnyFilename(filename) {
 
 module.exports = async (req, res) => {
     // ================== BLOK KODE PERBAIKAN CORS (PENTING!) ==================
-    // Memberikan izin kepada SEMUA domain ('*') untuk mengakses API ini.
-    // Ini aman untuk API publik.
     res.setHeader('Access-Control-Allow-Origin', '*');
-    
-    // Memberitahu browser metode apa saja yang diizinkan.
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    
-    // Memberitahu browser header apa saja yang boleh ada dalam permintaan.
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-    // Browser terkadang mengirim "preflight request" dengan metode OPTIONS
-    // untuk memeriksa izin CORS sebelum mengirim permintaan GET yang sebenarnya.
-    // Kita harus menanggapinya dengan status OK.
     if (req.method === 'OPTIONS') {
         return res.status(200).end();
     }
     // ========================= AKHIR BLOK PERBAIKAN CORS =========================
 
-
-    // Atur cache untuk menghemat kuota Vercel Anda.
+    // Atur cache
     res.setHeader('Cache-Control', 's-maxage=30, stale-while-revalidate=60');
 
     if (req.method !== 'GET') {
@@ -44,8 +34,6 @@ module.exports = async (req, res) => {
         const directoryPath = `/anon/gen/vaac/${currentYear}`;
         await client.cd(directoryPath);
         const list = await client.list();
-
-        // --- SISA KODE ANDA DI BAWAH INI SAMA PERSIS DAN SUDAH BENAR ---
 
         const darwinTxtFiles = list.filter(item => item.name.startsWith('IDY') && item.name.endsWith('.txt') && item.type === ftp.FileType.File);
         if (darwinTxtFiles.length === 0) {
@@ -72,19 +60,24 @@ module.exports = async (req, res) => {
         await client.downloadTo(txtWritable, latestFile.name);
         const fullText = Buffer.concat(txtChunks).toString('utf-8');
 
+        // --- BARU: Buat hash unik (sidik jari) dari seluruh konten teks VAA ---
+        const advisoryHash = crypto.createHash('sha1').update(fullText).digest('hex');
+
+        const advisoryMatch = fullText.match(/ADVISORY\s+NR:\s*(\d{4}\/\d+)/i);
+        const advisoryNumber = advisoryMatch ? advisoryMatch[1] : null;
+
         const isIndonesiaArea = /^AREA:\s*INDONESIA/im.test(fullText);
 
         if (!isIndonesiaArea) {
+            // Tetap kirim hash agar frontend tahu status VAA terbaru di server
             return res.status(200).json({
-                advisoryNumber: null,
+                advisoryNumber: advisoryNumber,
+                advisoryHash: advisoryHash, // <-- Kirim hash
                 message: "Latest VAA is not for Indonesia area.",
                 fullText: fullText,
                 imageBase64: null
             });
         }
-        
-        const advisoryMatch = fullText.match(/ADVISORY\s+NR:\s*(\d{4}\/\d+)/i);
-        const advisoryNumber = advisoryMatch ? advisoryMatch[1] : null;
         
         let imageBase64 = null;
         const matchingPngFile = list.find(item => 
@@ -100,8 +93,10 @@ module.exports = async (req, res) => {
             imageBase64 = `data:image/png;base64,${imageBuffer.toString('base64')}`;
         }
 
+        // --- MODIFIKASI: Tambahkan 'advisoryHash' ke respons JSON ---
         res.status(200).json({
           advisoryNumber: advisoryNumber,
+          advisoryHash: advisoryHash, // <-- Hash unik ditambahkan di sini
           fullText: fullText,
           imageBase64: imageBase64,
         });
